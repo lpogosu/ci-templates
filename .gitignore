@@ -1,0 +1,22 @@
+# Downloaded tooling and caches.
+.tools/
+.cache/
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Test and coverage output.
+.coverage
+coverage.xml
+htmlcov/
+
+# Packaging.
+build/
+dist/
+*.egg-info/
+
+# Local environment.
+.env

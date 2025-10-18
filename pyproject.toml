@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ci-lint"
+version = "1.0.0"
+description = "Schema validation and invariant checks for reusable CI templates"
+authors = [{ name = "lpogosu" }]
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6.0", "jsonschema>=4.20"]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "ruff>=0.6",
+  "mypy>=1.11",
+  # Without these, `mypy --strict` treats yaml and jsonschema as Any and
+  # stops checking exactly the code that touches untrusted input.
+  "types-PyYAML>=6.0",
+  "types-jsonschema>=4.20",
+]
+
+[tool.setuptools.packages.find]
+# The package lives under tools/ rather than at the root, so that a caller
+# repository can vendor one directory and get the checker with it. The
+# vendored schemas stay outside the package and are located relative to it,
+# which keeps an editable install working from the source tree.
+where = ["tools"]
+include = ["ci_lint*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["tools", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["tools/ci_lint", "tests", ".github/actions/coverage-gate/gate.py"]
+mypy_path = "tools"
+
+[[tool.mypy.overrides]]
+module = "gate"
+# The composite action's script is executed by the runner, never imported by
+# the package, so it has no place on the package path.
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["tools"]
+
+[tool.coverage.run]
+source = ["tools/ci_lint"]
+branch = true

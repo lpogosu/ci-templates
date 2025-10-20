@@ -1,0 +1,170 @@
+# What ci-lint needs to know about this repository specifically. Everything
+# else it checks is a property of CI in general and lives in the rules.
+
+# A reusable workflow cannot pin a reference back into its own repository to a
+# commit SHA: the commit that would be pinned is the one being written. The
+# release tag is the only ref available, so the checker enforces that every
+# self-reference uses this one and nothing else.
+self_reference:
+  repository: lpogosu/ci-templates
+  ref: v1
+
+parity:
+  # The same pipeline, expressed for two CI systems. Nothing executable is
+  # shared between them, so the interface is checked mechanically instead.
+  pairs:
+    - name: python
+      github: .github/workflows/python.yml
+      gitlab: gitlab/python.yml
+    - name: node
+      github: .github/workflows/node.yml
+      gitlab: gitlab/node.yml
+    - name: go
+      github: .github/workflows/go.yml
+      gitlab: gitlab/go.yml
+    - name: container
+      github: .github/workflows/container.yml
+      gitlab: gitlab/container.yml
+    - name: release
+      github: .github/workflows/release.yml
+      gitlab: gitlab/release.yml
+
+  # Every input that exists on one side and not the other, or defaults
+  # differently, needs a sentence here. `pipeline: "*"` covers a difference
+  # that is the same in every pipeline. This list is the honest answer to
+  # "how much of this is really shared": roughly half of each interface is
+  # portable and the rest is shaped by the product it runs on.
+  exceptions:
+    - pipeline: "*"
+      input: runs-on
+      reason: >-
+        GitHub picks a runner per job. GitLab picks one per pipeline through
+        `default:tags` in the caller's own file, which covers every job at
+        once, so a per-component input would only be able to make it worse.
+    - pipeline: "*"
+      input: stage
+      reason: >-
+        GitLab orders jobs by stage and a component has to attach its jobs to
+        one that the caller declared. GitHub orders jobs by `needs:` and the
+        caller owns the graph, so there is nothing to pass.
+    - pipeline: "*"
+      input: job_prefix
+      reason: >-
+        GitLab job names are global to the pipeline, so including a component
+        twice needs distinct names. GitHub job ids are chosen by the caller in
+        the calling workflow and cannot collide.
+    - pipeline: "*"
+      input: runner_image
+      reason: >-
+        GitLab runs the job inside an image, which is an artefact to pin by
+        digest. GitHub runs on a VM and installs the toolchain with a setup-*
+        action, so the version is a string and the pinning problem moves to
+        the action.
+    - pipeline: "*"
+      input: cache-dependency-path
+      reason: >-
+        actions/setup-* builds its cache key from a lockfile glob. GitLab's
+        `cache:key:files` is written into the template itself and is not
+        something a caller has a reason to redirect.
+
+    - pipeline: python
+      input: python-versions
+      reason: >-
+        A GitHub matrix fans out over interpreter versions in one job
+        definition. The GitLab equivalent is the image, which is already an
+        input, so a second version input would contradict it.
+    - pipeline: python
+      input: cache
+      reason: >-
+        Selects the actions/setup-python cache backend (pip, poetry, pipenv).
+        GitLab caching is a `cache:` block in the template and has no such
+        backend concept.
+
+    - pipeline: node
+      input: node-versions
+      reason: >-
+        Same reason as python-versions: matrix on GitHub, runner_image on
+        GitLab.
+    - pipeline: node
+      input: registry-url
+      reason: >-
+        actions/setup-node writes the .npmrc for a private registry when this
+        is set. On GitLab that is one project variable and a line in the
+        caller's own before_script, not template configuration.
+
+    - pipeline: go
+      input: go-versions
+      reason: >-
+        Same reason as python-versions: matrix on GitHub, runner_image on
+        GitLab.
+    - pipeline: go
+      input: golangci-lint-version
+      reason: >-
+        The GitHub action downloads a release by version string; the GitLab
+        job runs the linter's own image, so the same choice is expressed as
+        golangci_lint_image and pinned by digest.
+    - pipeline: go
+      input: golangci_lint_image
+      reason: >-
+        The digest-pinned counterpart of golangci-lint-version; see that
+        entry for why the two cannot be one input.
+
+    - pipeline: container
+      input: image
+      reason: >-
+        GitLab gives every project a registry path in $CI_REGISTRY_IMAGE, so
+        the default is correct without asking. GitHub has no equivalent
+        predefined value, which is why the input is required there.
+    - pipeline: container
+      input: registry
+      reason: >-
+        Same asymmetry as `image`: $CI_REGISTRY is predefined on GitLab and
+        ghcr.io is only a sensible guess on GitHub.
+    - pipeline: container
+      input: platforms
+      reason: >-
+        The GitLab pipeline hands the scanned tarball to the push job, and a
+        tarball holds one platform. Offering a platforms input there would
+        mean offering one the implementation has to ignore.
+    - pipeline: container
+      input: trivy-version
+      reason: >-
+        The GitHub action installs Trivy by version; the GitLab job runs the
+        Trivy image, so the same choice is trivy_image and is digest-pinned.
+    - pipeline: container
+      input: trivy_image
+      reason: >-
+        The digest-pinned counterpart of trivy-version; see that entry.
+    - pipeline: container
+      input: docker_image
+      reason: >-
+        GitLab needs an explicit Docker CLI image for the build job. The
+        GitHub runner ships Docker and buildx already.
+    - pipeline: container
+      input: dind_image
+      reason: >-
+        GitLab needs a Docker-in-Docker service to have a daemon at all;
+        there is no such thing to configure on a GitHub runner.
+
+    - pipeline: release
+      input: files
+      reason: >-
+        A GitHub release carries uploaded assets. A GitLab release carries
+        links to artefacts that already live somewhere, which is a different
+        object and not expressible as the same input.
+    - pipeline: release
+      input: draft
+      reason: >-
+        GitHub releases can be created unpublished. GitLab has no draft
+        release state.
+    - pipeline: release
+      input: prerelease
+      reason: >-
+        GitHub marks a release as a prerelease. GitLab expresses the same
+        thing through the tag name and release milestones instead.
+    - pipeline: release
+      input: release_cli_image
+      reason: >-
+        GitLab creates the release object with release-cli running in its own
+        image. GitHub creates it through the API from an action, so there is
+        no image to pin.

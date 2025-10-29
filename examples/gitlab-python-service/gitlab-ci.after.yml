@@ -1,0 +1,20 @@
+# .gitlab-ci.yml after the move.
+#
+# Runner selection stays here on purpose: GitLab picks it per pipeline, so a
+# `default:tags` block covers every job the components add.
+
+stages:
+  - test
+  - build
+  - release
+
+default:
+  tags:
+    - docker
+
+include:
+  - component: $CI_SERVER_FQDN/lpogosu/ci-templates/python@v1
+    inputs:
+      coverage_min: 85
+  - component: $CI_SERVER_FQDN/lpogosu/ci-templates/container@v1
+  - component: $CI_SERVER_FQDN/lpogosu/ci-templates/release@v1

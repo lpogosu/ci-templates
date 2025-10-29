@@ -1,0 +1,108 @@
+# .gitlab-ci.yml in a caller project, written by hand.
+#
+# The same service as examples/python-service, on GitLab. Two of the three
+# images float on a tag, the coverage threshold is written twice in two
+# different ways, and the image is pushed before it is scanned.
+
+stages:
+  - test
+  - build
+  - release
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+.python:
+  image: python:3.13-slim
+  cache:
+    key:
+      files:
+        - pyproject.toml
+    paths:
+      - .cache/pip
+  before_script:
+    - python -m pip install --upgrade pip
+    - python -m pip install -e ".[dev]"
+
+lint:
+  extends: .python
+  stage: test
+  script:
+    - ruff check .
+    - ruff format --check .
+
+typecheck:
+  extends: .python
+  stage: test
+  script:
+    - mypy
+
+test:
+  extends: .python
+  stage: test
+  script:
+    - pytest --cov --cov-report=xml --cov-report=term-missing --cov-fail-under=85
+  coverage: '/^TOTAL.+?(\d+\%)$/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+build-image:
+  stage: build
+  image: docker:cli
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_CERT_PATH: /certs/client
+    DOCKER_TLS_VERIFY: "1"
+  script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" "$CI_REGISTRY_IMAGE:latest"
+        docker push "$CI_REGISTRY_IMAGE:latest"
+      fi
+
+scan-image:
+  stage: build
+  needs: [build-image]
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  # allow_failure means the pipeline stays green whatever this finds, which
+  # is how a scan stage survives its first busy week.
+  allow_failure: true
+  script:
+    - trivy image --severity HIGH,CRITICAL --exit-code 1 "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - apk add --no-cache git
+    - |
+      last=$(git tag --sort=-creatordate | head -n 1)
+      major=$(echo "${last#v}" | cut -d. -f1)
+      minor=$(echo "${last#v}" | cut -d. -f2)
+      patch=$(echo "${last#v}" | cut -d. -f3)
+      minor=$((minor + 1))
+      echo "RELEASE_TAG=v$major.$minor.0" > release.env
+      git log --format='- %s' "$last"..HEAD > release-notes.md
+  artifacts:
+    paths:
+      - release-notes.md
+    reports:
+      dotenv: release.env
+  release:
+    tag_name: $RELEASE_TAG
+    description: release-notes.md

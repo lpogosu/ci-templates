@@ -1,0 +1,23 @@
+# .github/workflows/ci.yml after the move.
+#
+# The coverage gate now parses the coverprofile with arithmetic instead of
+# string comparison, and it fails when the file is missing rather than
+# printing a number nobody reads.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: lpogosu/ci-templates/.github/workflows/go.yml@v1
+    with:
+      coverage-min: 70
+      goprivate: example.internal/*
+    secrets:
+      goprivate-token: ${{ secrets.GOPRIVATE_TOKEN }}

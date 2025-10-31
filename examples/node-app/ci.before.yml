@@ -1,0 +1,65 @@
+# .github/workflows/ci.yml in a caller repository, written by hand.
+#
+# A pnpm front-end. Note the two places where this copy has already drifted
+# from the Python one next to it: a different Node setup action version, and
+# a coverage threshold expressed as a Vitest flag in one job and as a grep in
+# another.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Type check
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test -- --coverage --coverage.reporter=cobertura
+
+      - name: Coverage gate
+        run: |
+          rate=$(python3 -c "
+          import xml.etree.ElementTree as ET
+          print(float(ET.parse('coverage/cobertura-coverage.xml').getroot().get('line-rate')) * 100)
+          ")
+          echo "coverage $rate"
+          python3 -c "import sys; sys.exit(0 if $rate >= 80 else 1)"
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.node-version }}
+          path: dist
+
+  # A second workflow file in the same repository does the container build,
+  # with its own copy of the login/metadata/build-push block and its own
+  # opinion about when to push. It is not reproduced here; it is 70 more
+  # lines that look almost, but not exactly, like the Python service's.

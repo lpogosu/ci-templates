@@ -1,0 +1,18 @@
+# .github/workflows/ci.yml after the move.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: lpogosu/ci-templates/.github/workflows/node.yml@v1
+    with:
+      node-versions: '["22", "24"]'
+      package-manager: pnpm
+      coverage-min: 80

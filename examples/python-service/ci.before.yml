@@ -1,0 +1,154 @@
+# .github/workflows/ci.yml in a caller repository, written by hand.
+#
+# This is the file the templates replace. It is not a strawman: it is the
+# shape a Python service workflow reaches after a year of small fixes, and
+# every block in it exists because something once went wrong. The problem is
+# not that any one line is bad — it is that the same 140 lines now live in
+# eleven repositories and no two copies are the same.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-${{ matrix.python-version }}-
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Ruff format
+        run: ruff format --check .
+
+      - name: Mypy
+        run: mypy
+
+      - name: Tests
+        run: pytest --cov --cov-report=xml --cov-report=term-missing
+
+      - name: Coverage gate
+        # Every repository grew its own version of this. This one silently
+        # passes when coverage.xml is absent, because `python - <<EOF` exits 0
+        # if the file is missing and the team never noticed.
+        run: |
+          python - <<'EOF'
+          import xml.etree.ElementTree as ET
+          import sys
+          try:
+              root = ET.parse("coverage.xml").getroot()
+          except FileNotFoundError:
+              print("no coverage report")
+              sys.exit(0)
+          rate = float(root.get("line-rate", 0)) * 100
+          print(f"coverage {rate:.1f}%")
+          if rate < 85:
+              print("coverage below 85%")
+              sys.exit(1)
+          EOF
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+
+  build-image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan
+        # Runs after the push. Whatever it finds is already in the registry
+        # and already pullable, so this is a report, not a gate.
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+        continue-on-error: true
+
+  release:
+    if: github.ref == 'refs/heads/main'
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Next version
+        id: version
+        run: |
+          last=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)
+          major=$(echo "${last#v}" | cut -d. -f1)
+          minor=$(echo "${last#v}" | cut -d. -f2)
+          patch=$(echo "${last#v}" | cut -d. -f3)
+          if git log "$last"..HEAD --format=%s | grep -q '^feat'; then
+            minor=$((minor + 1)); patch=0
+          else
+            patch=$((patch + 1))
+          fi
+          echo "tag=v$major.$minor.$patch" >> "$GITHUB_OUTPUT"
+
+      - name: Notes
+        run: git log --format='- %s' "$(git describe --tags --abbrev=0)"..HEAD > NOTES.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          body_path: NOTES.md

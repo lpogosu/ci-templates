@@ -1,0 +1,40 @@
+# .github/workflows/ci.yml in the same caller repository, after the move.
+#
+# The three jobs are the same three pipelines. Everything that used to be
+# copy-pasted — pinning, caching, the coverage gate, the tag scheme, the
+# version arithmetic — now lives in one place and is tested there.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: lpogosu/ci-templates/.github/workflows/python.yml@v1
+    with:
+      python-versions: '["3.12", "3.13"]'
+      coverage-min: 85
+    secrets:
+      codecov-token: ${{ secrets.CODECOV_TOKEN }}
+
+  image:
+    needs: test
+    uses: lpogosu/ci-templates/.github/workflows/container.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image: ghcr.io/${{ github.repository }}
+
+  release:
+    if: github.ref == 'refs/heads/main'
+    needs: image
+    uses: lpogosu/ci-templates/.github/workflows/release.yml@v1
+    permissions:
+      contents: write

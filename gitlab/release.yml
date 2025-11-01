@@ -1,0 +1,137 @@
+# GitLab CI/CD component: derive the next semantic version from the
+# conventional commits since the last tag and publish a GitLab release.
+#
+# The version arithmetic here is a second implementation of the rules in
+# .github/actions/semver-next/next.sh, and that is a genuine duplication, not
+# a shared library with two front ends: a GitLab component is one YAML file
+# and cannot carry a script. ci-lint's parity check keeps the inputs in step;
+# nothing keeps the two shell implementations in step except review. It is the
+# weakest seam in this repository and is named as such rather than hidden.
+#
+# Two jobs rather than one, because GitLab runs `release:` after the script
+# unconditionally. The decision to release has to be a `rules:` condition on a
+# separate job, fed by a dotenv variable from the job that made it.
+
+spec:
+  inputs:
+    runner_image:
+      description: Digest-pinned image the version job runs in; needs only a shell and git.
+      type: string
+      default: "alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce"
+    release_cli_image:
+      description: Digest-pinned release-cli image used to create the release object.
+      type: string
+      default: "registry.gitlab.com/gitlab-org/release-cli:v0.24.0@sha256:3f52d526f48e8d10625c722fa6d6423ee82aadeae1b1aa91f07b62551d96dacf"
+    tag_prefix:
+      description: Prefix in front of the version inside the tag name.
+      type: string
+      default: v
+    initial_version:
+      description: Version used for the first release, when no tag exists yet.
+      type: string
+      default: 0.1.0
+    dry_run:
+      description: Compute the version and the notes, print them, and stop.
+      type: boolean
+      default: false
+    timeout_minutes:
+      description: Per-job timeout in minutes.
+      type: number
+      default: 10
+    stage:
+      description: Stage both jobs are attached to.
+      type: string
+      default: release
+    job_prefix:
+      description: Prefix for the job names.
+      type: string
+      default: ""
+
+---
+variables:
+  TPL_RELEASE_TAG_PREFIX: "$[[ inputs.tag_prefix ]]"
+  TPL_RELEASE_INITIAL_VERSION: "$[[ inputs.initial_version ]]"
+  TPL_RELEASE_DRY_RUN: "$[[ inputs.dry_run ]]"
+
+"$[[ inputs.job_prefix ]]release-version":
+  image: $[[ inputs.runner_image ]]
+  stage: $[[ inputs.stage ]]
+  timeout: $[[ inputs.timeout_minutes ]] minutes
+  interruptible: false
+  variables:
+    # Tags and the full history are required. A shallow clone makes the
+    # version arithmetic quietly wrong rather than loudly broken.
+    GIT_DEPTH: 0
+    GIT_STRATEGY: clone
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - apk add --no-cache git
+  script:
+    - |
+      set -eu
+      previous=$(git tag --list "${TPL_RELEASE_TAG_PREFIX}[0-9]*" --sort=-v:refname | head -n 1)
+      if [ -n "$previous" ]; then range="${previous}..HEAD"; else range="HEAD"; fi
+
+      subjects=$(git log --no-merges --format=%s "$range")
+      bodies=$(git log --no-merges --format=%B "$range")
+      has() { printf '%s\n' "$subjects" | grep -qE "$1"; }
+
+      breaking=false
+      if has '^[a-zA-Z]+(\([^)]*\))?!:' || printf '%s\n' "$bodies" | grep -qE '^BREAKING[ -]CHANGE:'; then
+        breaking=true
+      fi
+
+      if [ -z "$previous" ]; then
+        version="$TPL_RELEASE_INITIAL_VERSION"; bump=initial
+      else
+        old="${previous#"$TPL_RELEASE_TAG_PREFIX"}"
+        major=${old%%.*}; rest=${old#*.}; minor=${rest%%.*}; patch=${rest#*.}
+        if [ "$breaking" = true ] && [ "$major" -ne 0 ]; then
+          bump=major; version="$((major + 1)).0.0"
+        elif [ "$breaking" = true ] || has '^feat(\([^)]*\))?:'; then
+          # Semver 4: while the major version is zero a breaking change is
+          # still only a minor bump, because nothing was declared stable yet.
+          bump=minor; version="${major}.$((minor + 1)).0"
+        elif has '^(fix|perf)(\([^)]*\))?:'; then
+          bump=patch; version="${major}.${minor}.$((patch + 1))"
+        else
+          bump=none; version=""
+        fi
+      fi
+
+      git log --no-merges --format='- %s (`%h`)' "$range" > release-notes.md
+      echo "release-version: ${previous:-<none>} -> ${version:-<no release>} (${bump})"
+
+      if [ -z "$version" ]; then
+        echo "RELEASE_SKIP=no releasable commits" > release.env
+      elif [ "$TPL_RELEASE_DRY_RUN" = "true" ]; then
+        echo "RELEASE_SKIP=dry_run" > release.env
+        cat release-notes.md
+      else
+        echo "RELEASE_TAG=${TPL_RELEASE_TAG_PREFIX}${version}" > release.env
+      fi
+  artifacts:
+    when: always
+    paths:
+      - release-notes.md
+    reports:
+      dotenv: release.env
+
+"$[[ inputs.job_prefix ]]release-publish":
+  image: $[[ inputs.release_cli_image ]]
+  stage: $[[ inputs.stage ]]
+  timeout: $[[ inputs.timeout_minutes ]] minutes
+  interruptible: false
+  needs:
+    - "$[[ inputs.job_prefix ]]release-version"
+  rules:
+    # RELEASE_TAG only exists when the previous job decided to release, so
+    # "nothing to release" and "dry run" both stop here without a red job.
+    - if: $RELEASE_TAG
+  script:
+    - echo "creating $RELEASE_TAG"
+  release:
+    tag_name: $RELEASE_TAG
+    description: release-notes.md
+    ref: $CI_COMMIT_SHA

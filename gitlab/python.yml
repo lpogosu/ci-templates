@@ -1,0 +1,121 @@
+# GitLab CI/CD component: Python lint, type check and test with a coverage
+# gate. Mirrors .github/workflows/python.yml input for input; the differences
+# that remain are listed in ci-lint.yaml with a reason each.
+#
+# Include it with three lines:
+#
+#   include:
+#     - component: $CI_SERVER_FQDN/lpogosu/ci-templates/python@v1
+#       inputs: { coverage_min: 85 }
+#
+# The image default carries its digest. Keeping the digest inside the default
+# instead of in a separate input means that overriding the interpreter version
+# cannot silently drop the pin — the caller has to supply a full reference.
+
+spec:
+  inputs:
+    runner_image:
+      description: Digest-pinned Python image the jobs run in.
+      type: string
+      default: "python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285"
+    working_directory:
+      description: Directory containing the project; every script runs there.
+      type: string
+      default: "."
+    install:
+      description: Command that installs the project together with its development extras.
+      type: string
+      default: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+    lint:
+      description: Run `ruff check` and `ruff format --check`.
+      type: boolean
+      default: true
+    typecheck:
+      description: Run `mypy`; configuration comes from the project itself.
+      type: boolean
+      default: true
+    test_command:
+      description: Test command; must produce coverage_report when coverage_min is above zero.
+      type: string
+      default: pytest --cov --cov-report=xml --cov-report=term-missing
+    coverage_min:
+      description: Minimum total line coverage in percent. 0 turns the gate off.
+      type: number
+      default: 0
+    coverage_report:
+      description: Cobertura XML file published to the merge request.
+      type: string
+      default: coverage.xml
+    timeout_minutes:
+      description: Per-job timeout in minutes.
+      type: number
+      default: 15
+    stage:
+      description: Stage the jobs are attached to. It has to exist in the caller's `stages`.
+      type: string
+      default: test
+    job_prefix:
+      description: Prefix for the job names, so the component can be included more than once.
+      type: string
+      default: ""
+
+---
+# Global rather than job-level because `rules:if` is evaluated before the job
+# variables exist. The prefix keeps them out of the caller's namespace.
+variables:
+  TPL_PYTHON_LINT: "$[[ inputs.lint ]]"
+  TPL_PYTHON_TYPECHECK: "$[[ inputs.typecheck ]]"
+  TPL_PYTHON_COVERAGE_MIN: "$[[ inputs.coverage_min ]]"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+".python-base":
+  image: $[[ inputs.runner_image ]]
+  stage: $[[ inputs.stage ]]
+  timeout: $[[ inputs.timeout_minutes ]] minutes
+  interruptible: true
+  cache:
+    key:
+      files:
+        - $[[ inputs.working_directory ]]/pyproject.toml
+    paths:
+      - .cache/pip
+  before_script:
+    - cd "$[[ inputs.working_directory ]]"
+    - $[[ inputs.install ]]
+
+"$[[ inputs.job_prefix ]]python-lint":
+  extends: ".python-base"
+  rules:
+    - if: $TPL_PYTHON_LINT == "true"
+  script:
+    - ruff check --output-format=full .
+    - ruff format --check .
+
+"$[[ inputs.job_prefix ]]python-typecheck":
+  extends: ".python-base"
+  rules:
+    - if: $TPL_PYTHON_TYPECHECK == "true"
+  script:
+    - mypy
+
+"$[[ inputs.job_prefix ]]python-test":
+  extends: ".python-base"
+  script:
+    # pytest-cov enforces the threshold itself. On GitHub the same gate is a
+    # composite action, because there one implementation can serve Python,
+    # Node and Go; a component is a single YAML file and can ship no code, so
+    # here the ecosystem's own flag does the work.
+    - |
+      if [ "$TPL_PYTHON_COVERAGE_MIN" != "0" ]; then
+        set -- "--cov-fail-under=$TPL_PYTHON_COVERAGE_MIN"
+      else
+        set --
+      fi
+      $[[ inputs.test_command ]] "$@"
+  coverage: '/^TOTAL.+?(\d+\%)$/'
+  artifacts:
+    when: always
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: $[[ inputs.working_directory ]]/$[[ inputs.coverage_report ]]

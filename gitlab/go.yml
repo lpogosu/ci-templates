@@ -1,0 +1,138 @@
+# GitLab CI/CD component: Go lint, test under the race detector with a
+# coverage gate, build. Mirrors .github/workflows/go.yml.
+#
+#   include:
+#     - component: $CI_SERVER_FQDN/lpogosu/ci-templates/go@v1
+#       inputs: { coverage_min: 70 }
+
+spec:
+  inputs:
+    runner_image:
+      description: Digest-pinned Go image the jobs run in.
+      type: string
+      default: "golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"
+    golangci_lint_image:
+      description: >-
+        Digest-pinned golangci-lint image. Separate from `runner_image`,
+        because the linter release rather than the Go release is what decides
+        which checks run.
+      type: string
+      default: "golangci/golangci-lint:v2.13.2-alpine@sha256:da1f79b184ff1d98781648407d05a99b9cba7b282aa3416b0a0eac102a3b0557"
+    working_directory:
+      description: Directory containing go.mod; every script runs there.
+      type: string
+      default: "."
+    lint:
+      description: Run golangci-lint.
+      type: boolean
+      default: true
+    test_command:
+      description: Test command; must write coverage_report when coverage_min is above zero.
+      type: string
+      default: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+    coverage_min:
+      description: Minimum total statement coverage in percent. 0 turns the gate off.
+      type: number
+      default: 0
+    coverage_report:
+      description: Go coverprofile written by the test command.
+      type: string
+      default: coverage.out
+    build:
+      description: Run the build command after the tests pass.
+      type: boolean
+      default: true
+    build_command:
+      description: Build command; overridden when a repository builds several binaries.
+      type: string
+      default: go build ./...
+    goprivate:
+      description: >-
+        Value for GOPRIVATE, e.g. `example.internal/*`. Setting it also
+        rewrites the module proxy for those paths to authenticated HTTPS,
+        using the GOPRIVATE_TOKEN project variable.
+      type: string
+      default: ""
+    timeout_minutes:
+      description: Per-job timeout in minutes.
+      type: number
+      default: 20
+    stage:
+      description: Stage the jobs are attached to.
+      type: string
+      default: test
+    job_prefix:
+      description: Prefix for the job names, so the component can be included more than once.
+      type: string
+      default: ""
+
+---
+variables:
+  TPL_GO_LINT: "$[[ inputs.lint ]]"
+  TPL_GO_BUILD: "$[[ inputs.build ]]"
+  TPL_GO_COVERAGE_MIN: "$[[ inputs.coverage_min ]]"
+  GOPRIVATE: "$[[ inputs.goprivate ]]"
+  GOPATH: "$CI_PROJECT_DIR/.cache/go"
+  GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
+
+".go-base":
+  image: $[[ inputs.runner_image ]]
+  stage: $[[ inputs.stage ]]
+  timeout: $[[ inputs.timeout_minutes ]] minutes
+  interruptible: true
+  cache:
+    key:
+      files:
+        - $[[ inputs.working_directory ]]/go.sum
+    paths:
+      - .cache/go/pkg/mod
+      - .cache/go-build
+  before_script:
+    - cd "$[[ inputs.working_directory ]]"
+    - |
+      if [ -n "$GOPRIVATE" ]; then
+        if [ -z "${GOPRIVATE_TOKEN:-}" ]; then
+          echo "goprivate is set but the GOPRIVATE_TOKEN project variable is empty" >&2
+          exit 1
+        fi
+        host="${GOPRIVATE%%/*}"
+        git config --global "url.https://x-access-token:${GOPRIVATE_TOKEN}@${host}/.insteadOf" "https://${host}/"
+      fi
+
+"$[[ inputs.job_prefix ]]go-lint":
+  extends: ".go-base"
+  image: $[[ inputs.golangci_lint_image ]]
+  rules:
+    - if: $TPL_GO_LINT == "true"
+  script:
+    - golangci-lint run --timeout 5m
+
+"$[[ inputs.job_prefix ]]go-test":
+  extends: ".go-base"
+  script:
+    - $[[ inputs.test_command ]]
+    # Go has no `--fail-under`, so the gate is arithmetic on the coverprofile.
+    # `go tool cover -func` prints the same total the GitHub composite action
+    # computes from the raw profile; both read the file the tests wrote, so
+    # neither can report a number the tests did not produce.
+    - |
+      if [ "$TPL_GO_COVERAGE_MIN" != "0" ]; then
+        total=$(go tool cover -func="$[[ inputs.coverage_report ]]" | awk '$1 == "total:" { sub(/%/, "", $3); print $3 }')
+        echo "coverage: ${total}% (minimum ${TPL_GO_COVERAGE_MIN}%)"
+        awk -v got="$total" -v want="$TPL_GO_COVERAGE_MIN" 'BEGIN { exit (got + 0 >= want + 0) ? 0 : 1 }'
+      fi
+  coverage: '/^total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    when: always
+    paths:
+      - $[[ inputs.working_directory ]]/$[[ inputs.coverage_report ]]
+    expire_in: 7 days
+
+"$[[ inputs.job_prefix ]]go-build":
+  extends: ".go-base"
+  needs:
+    - "$[[ inputs.job_prefix ]]go-test"
+  rules:
+    - if: $TPL_GO_BUILD == "true"
+  script:
+    - $[[ inputs.build_command ]]

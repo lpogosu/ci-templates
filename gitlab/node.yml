@@ -1,0 +1,156 @@
+# GitLab CI/CD component: Node install, lint, type check, test with a
+# coverage gate, build. Mirrors .github/workflows/node.yml.
+#
+#   include:
+#     - component: $CI_SERVER_FQDN/lpogosu/ci-templates/node@v1
+#       inputs: { coverage_min: 80, artifact_path: dist }
+
+spec:
+  inputs:
+    runner_image:
+      description: Digest-pinned Node image the jobs run in.
+      type: string
+      default: "node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf"
+    package_manager:
+      description: Either `npm` or `pnpm`. Anything else fails the install script.
+      type: string
+      default: npm
+      options: ["npm", "pnpm"]
+    working_directory:
+      description: Directory containing package.json; every script runs there.
+      type: string
+      default: "."
+    install:
+      description: >-
+        Dependency install command. Empty picks the lockfile-respecting
+        default for package_manager.
+      type: string
+      default: ""
+    lint:
+      description: Run the lint script when package.json defines one.
+      type: boolean
+      default: true
+    typecheck:
+      description: Run the typecheck script when package.json defines one.
+      type: boolean
+      default: true
+    build:
+      description: Run the build script after the tests pass.
+      type: boolean
+      default: true
+    test_command:
+      description: Test command; must produce coverage_report when coverage_min is above zero.
+      type: string
+      default: npm run test -- --coverage --coverage.reporter=cobertura
+    coverage_min:
+      description: Minimum total line coverage in percent. 0 turns the gate off.
+      type: number
+      default: 0
+    coverage_report:
+      description: Cobertura XML file published to the merge request.
+      type: string
+      default: coverage/cobertura-coverage.xml
+    artifact_path:
+      description: >-
+        Build output to keep. A library that produces nothing sets
+        `build: false` rather than emptying this.
+      type: string
+      default: dist
+    timeout_minutes:
+      description: Per-job timeout in minutes.
+      type: number
+      default: 15
+    stage:
+      description: Stage the jobs are attached to.
+      type: string
+      default: test
+    job_prefix:
+      description: Prefix for the job names, so the component can be included more than once.
+      type: string
+      default: ""
+
+---
+variables:
+  TPL_NODE_LINT: "$[[ inputs.lint ]]"
+  TPL_NODE_TYPECHECK: "$[[ inputs.typecheck ]]"
+  TPL_NODE_BUILD: "$[[ inputs.build ]]"
+  TPL_NODE_COVERAGE_MIN: "$[[ inputs.coverage_min ]]"
+  TPL_NODE_PACKAGE_MANAGER: "$[[ inputs.package_manager ]]"
+  TPL_NODE_INSTALL: "$[[ inputs.install ]]"
+
+".node-base":
+  image: $[[ inputs.runner_image ]]
+  stage: $[[ inputs.stage ]]
+  timeout: $[[ inputs.timeout_minutes ]] minutes
+  interruptible: true
+  cache:
+    key:
+      files:
+        - $[[ inputs.working_directory ]]/package-lock.json
+        - $[[ inputs.working_directory ]]/pnpm-lock.yaml
+    paths:
+      - $[[ inputs.working_directory ]]/node_modules
+  before_script:
+    - cd "$[[ inputs.working_directory ]]"
+    - |
+      case "$TPL_NODE_PACKAGE_MANAGER" in
+        npm) ;;
+        pnpm) corepack enable pnpm ;;
+        *) echo "package_manager must be npm or pnpm, got '$TPL_NODE_PACKAGE_MANAGER'" >&2; exit 1 ;;
+      esac
+    - |
+      if [ -n "$TPL_NODE_INSTALL" ]; then
+        sh -c "$TPL_NODE_INSTALL"
+      elif [ "$TPL_NODE_PACKAGE_MANAGER" = pnpm ]; then
+        pnpm install --frozen-lockfile
+      else
+        npm ci
+      fi
+
+"$[[ inputs.job_prefix ]]node-lint":
+  extends: ".node-base"
+  rules:
+    - if: $TPL_NODE_LINT == "true"
+  script:
+    - $TPL_NODE_PACKAGE_MANAGER run --if-present lint
+
+"$[[ inputs.job_prefix ]]node-typecheck":
+  extends: ".node-base"
+  rules:
+    - if: $TPL_NODE_TYPECHECK == "true"
+  script:
+    - $TPL_NODE_PACKAGE_MANAGER run --if-present typecheck
+
+"$[[ inputs.job_prefix ]]node-test":
+  extends: ".node-base"
+  script:
+    # Vitest enforces the threshold itself, which is why the default test
+    # command already names a Vitest flag. A caller on Jest overrides
+    # test_command and sets coverageThreshold in the Jest config instead.
+    - |
+      if [ "$TPL_NODE_COVERAGE_MIN" != "0" ]; then
+        set -- "--coverage.thresholds.lines=$TPL_NODE_COVERAGE_MIN"
+      else
+        set --
+      fi
+      $[[ inputs.test_command ]] "$@"
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    when: always
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: $[[ inputs.working_directory ]]/$[[ inputs.coverage_report ]]
+
+"$[[ inputs.job_prefix ]]node-build":
+  extends: ".node-base"
+  needs:
+    - "$[[ inputs.job_prefix ]]node-test"
+  rules:
+    - if: $TPL_NODE_BUILD == "true"
+  script:
+    - $TPL_NODE_PACKAGE_MANAGER run --if-present build
+  artifacts:
+    paths:
+      - $[[ inputs.working_directory ]]/$[[ inputs.artifact_path ]]
+    expire_in: 7 days

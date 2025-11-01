@@ -1,0 +1,186 @@
+# GitLab CI/CD component: build a container image, scan it, then push it.
+# Mirrors .github/workflows/container.yml, with one deliberate difference.
+#
+# Here the scanned tarball travels between jobs as an artifact and the push
+# job loads exactly those bytes, so the pushed image is provably the image
+# that was scanned. On GitHub the same trick would move a multi-hundred
+# megabyte artifact through the Actions cache service twice, which costs more
+# than replaying the build from the layer cache, so that side rebuilds instead
+# and can only claim equivalence.
+#
+# The price here is the instance artifact limit: an image larger than
+# `artifacts:max_size` cannot travel this way, and a repository in that
+# position has to push to a scratch tag and scan by reference instead.
+
+spec:
+  inputs:
+    image:
+      description: Image name without a tag. Defaults to this project's registry path.
+      type: string
+      default: "$CI_REGISTRY_IMAGE"
+    registry:
+      description: Registry to log in to.
+      type: string
+      default: "$CI_REGISTRY"
+    context:
+      description: Build context passed to buildx.
+      type: string
+      default: "."
+    dockerfile:
+      description: Path to the Dockerfile, relative to the repository root.
+      type: string
+      default: Dockerfile
+    target:
+      description: Build stage to stop at. Empty means the last stage.
+      type: string
+      default: ""
+    build_args:
+      description: Whitespace-separated KEY=value build arguments.
+      type: string
+      default: ""
+    push:
+      description: Push after a clean scan. Merge request pipelines never push.
+      type: boolean
+      default: true
+    scan:
+      description: Run the vulnerability gate.
+      type: boolean
+      default: true
+    scan_severity:
+      description: Severities that block the push.
+      type: string
+      default: HIGH,CRITICAL
+    scan_ignore_unfixed:
+      description: Ignore findings with no released fix.
+      type: boolean
+      default: true
+    docker_image:
+      description: Digest-pinned Docker CLI image used by the build and push jobs.
+      type: string
+      default: "docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d"
+    dind_image:
+      description: Digest-pinned Docker-in-Docker service image.
+      type: string
+      default: "docker:28-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac"
+    trivy_image:
+      description: Digest-pinned Trivy image used by the gate.
+      type: string
+      default: "aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e"
+    timeout_minutes:
+      description: Per-job timeout in minutes.
+      type: number
+      default: 30
+    stage:
+      description: Stage the jobs are attached to.
+      type: string
+      default: build
+    job_prefix:
+      description: Prefix for the job names, so the component can be included more than once.
+      type: string
+      default: ""
+
+---
+variables:
+  TPL_IMAGE: "$[[ inputs.image ]]"
+  TPL_REGISTRY: "$[[ inputs.registry ]]"
+  TPL_PUSH: "$[[ inputs.push ]]"
+  TPL_SCAN: "$[[ inputs.scan ]]"
+  TPL_SCAN_SEVERITY: "$[[ inputs.scan_severity ]]"
+  TPL_SCAN_IGNORE_UNFIXED: "$[[ inputs.scan_ignore_unfixed ]]"
+  TPL_BUILD_ARGS: "$[[ inputs.build_args ]]"
+  TPL_IMAGE_TAR: image.tar
+
+"$[[ inputs.job_prefix ]]container-build":
+  image: $[[ inputs.docker_image ]]
+  stage: $[[ inputs.stage ]]
+  timeout: $[[ inputs.timeout_minutes ]] minutes
+  interruptible: true
+  services:
+    - name: $[[ inputs.dind_image ]]
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_CERT_PATH: /certs/client
+    DOCKER_TLS_VERIFY: "1"
+  script:
+    - docker buildx create --use --name ci --driver docker-container
+    # `--output type=docker` produces a single-platform tarball, which is the
+    # only form the scan job can read and the push job can replay byte for
+    # byte. That is why this component has no `platforms` input at all: an
+    # input the implementation would have to ignore is worse than none.
+    - |
+      set -- \
+        --file "$[[ inputs.dockerfile ]]" \
+        --platform linux/amd64 \
+        --output "type=docker,dest=$TPL_IMAGE_TAR" \
+        --tag "$TPL_IMAGE:ci-scan"
+      if [ -n "$[[ inputs.target ]]" ]; then set -- "$@" --target "$[[ inputs.target ]]"; fi
+      for arg in $TPL_BUILD_ARGS; do set -- "$@" --build-arg "$arg"; done
+      docker buildx build "$@" "$[[ inputs.context ]]"
+  artifacts:
+    paths:
+      - $TPL_IMAGE_TAR
+    expire_in: 1 day
+
+"$[[ inputs.job_prefix ]]container-scan":
+  image:
+    name: $[[ inputs.trivy_image ]]
+    entrypoint: [""]
+  stage: $[[ inputs.stage ]]
+  timeout: $[[ inputs.timeout_minutes ]] minutes
+  interruptible: true
+  needs:
+    - "$[[ inputs.job_prefix ]]container-build"
+  rules:
+    - if: $TPL_SCAN == "true"
+  script:
+    - |
+      set -- --exit-code 1 --severity "$TPL_SCAN_SEVERITY" --scanners vuln
+      if [ "$TPL_SCAN_IGNORE_UNFIXED" = "true" ]; then set -- "$@" --ignore-unfixed; fi
+      trivy image --input "$TPL_IMAGE_TAR" "$@"
+
+"$[[ inputs.job_prefix ]]container-push":
+  image: $[[ inputs.docker_image ]]
+  stage: $[[ inputs.stage ]]
+  timeout: $[[ inputs.timeout_minutes ]] minutes
+  interruptible: false
+  services:
+    - name: $[[ inputs.dind_image ]]
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_CERT_PATH: /certs/client
+    DOCKER_TLS_VERIFY: "1"
+  needs:
+    - "$[[ inputs.job_prefix ]]container-build"
+    - job: "$[[ inputs.job_prefix ]]container-scan"
+      optional: true
+  rules:
+    # A merge request pipeline builds and scans but never publishes: a branch
+    # that has not been reviewed should not be able to move a registry tag.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: never
+    - if: $TPL_PUSH == "true"
+  script:
+    - docker login -u "${CI_REGISTRY_USER:-$REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD:-$REGISTRY_PASSWORD}" "$TPL_REGISTRY"
+    - docker load --input "$TPL_IMAGE_TAR"
+    # Tag set mirrors docker/metadata-action: an immutable sha tag, a moving
+    # branch or merge-request tag, the semantic version on a git tag, and
+    # `latest` only on the default branch.
+    - |
+      tags="sha-$CI_COMMIT_SHA"
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        tags="$tags ${CI_COMMIT_TAG#v}"
+      elif [ -n "$CI_COMMIT_BRANCH" ]; then
+        tags="$tags $CI_COMMIT_REF_SLUG"
+      fi
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        tags="$tags latest"
+      fi
+      for tag in $tags; do
+        docker tag "$TPL_IMAGE:ci-scan" "$TPL_IMAGE:$tag"
+        docker push "$TPL_IMAGE:$tag"
+      done
+      docker image inspect "$TPL_IMAGE:ci-scan" --format '{{ index .RepoDigests 0 }}' || true

@@ -1,0 +1,18 @@
+# Negative fixture: a composite action with an undocumented input, an unused
+# input, a mutable `uses:` and an injected context.
+# Expected: input-untyped, input-no-default, unused-input, pinned-uses,
+# script-injection.
+name: loose-action
+description: Fixture for the composite-action rules.
+inputs:
+  target:
+    description: Where to deploy.
+    required: true
+  undocumented:
+    required: false
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v5
+    - shell: bash
+      run: echo "deploying ${{ inputs.target }} from ${{ github.event.comment.body }}"

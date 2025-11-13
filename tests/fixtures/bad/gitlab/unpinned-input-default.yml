@@ -1,0 +1,14 @@
+# Negative fixture: the image is an input, which looks pinned until you read
+# the default. Expected: gitlab-pinned-image.
+spec:
+  inputs:
+    runner_image:
+      description: Image the job runs in.
+      type: string
+      default: "python:3.13-slim"
+---
+test:
+  image: $[[ inputs.runner_image ]]
+  timeout: 10 minutes
+  script:
+    - pytest

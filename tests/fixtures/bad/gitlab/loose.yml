@@ -1,0 +1,24 @@
+# Negative fixture: a component with an unpinned image, an unpinned service,
+# a job with no timeout, an undocumented input and an unused one.
+# Expected: gitlab-pinned-image x2, gitlab-job-timeout, gitlab-input-undocumented,
+# gitlab-unused-input.
+spec:
+  inputs:
+    stage:
+      description: Stage the job runs in.
+      type: string
+      default: test
+    undocumented:
+      default: "1"
+    never_used:
+      description: Declared and never interpolated.
+      type: string
+      default: ""
+---
+build:
+  stage: $[[ inputs.stage ]]
+  image: python:3.13-slim
+  services:
+    - name: postgres:17
+  script:
+    - pytest

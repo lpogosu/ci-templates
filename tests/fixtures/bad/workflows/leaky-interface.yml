@@ -1,0 +1,39 @@
+# Negative fixture: a reusable workflow whose declared interface and its real
+# one have drifted apart in every available direction.
+# Expected: unused-secret, undeclared-secret, unused-input, input-untyped,
+# input-no-default.
+name: leaky-interface
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Deployment target.
+        type: string
+        default: staging
+      never-read:
+        description: Nothing in this workflow looks at it.
+        type: string
+        default: ""
+      no-type:
+        description: Declared without a type.
+        default: "1"
+      no-default:
+        description: Optional and yet has nothing to fall back on.
+        type: string
+    secrets:
+      unused-key:
+        description: Declared and never read.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      TARGET: ${{ inputs.environment }}
+      DEPLOY_TOKEN: ${{ secrets.deploy-token }}
+    steps:
+      - run: ./deploy.sh "$TARGET"

@@ -1,0 +1,15 @@
+# Negative fixture: the suppression mechanism used as a mute button.
+# Expected: suppression-without-reason, and no job-timeout, because the
+# comment did claim that rule — it just failed to say anything.
+name: empty-suppression
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  # ci-lint: allow job-timeout -- because
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: make build

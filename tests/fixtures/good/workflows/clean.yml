@@ -1,0 +1,28 @@
+# Positive fixture: every invariant satisfied, so the checker must stay
+# silent on it. If a new rule ever fires here, the rule is wrong.
+name: clean
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Deployment target.
+        type: string
+        default: staging
+    secrets:
+      deploy-token:
+        description: Token the deploy script authenticates with.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TARGET: ${{ inputs.environment }}
+      DEPLOY_TOKEN: ${{ secrets.deploy-token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: ./deploy.sh "$TARGET"

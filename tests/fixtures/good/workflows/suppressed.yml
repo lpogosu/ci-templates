@@ -1,0 +1,14 @@
+# Positive fixture: one rule is suppressed with an argument, which is the
+# only way a suppression is allowed to work.
+name: suppressed
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  # ci-lint: allow job-timeout -- dispatcher job, finishes in seconds, a timeout here would only fire during a GitHub outage
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: gh workflow run downstream.yml

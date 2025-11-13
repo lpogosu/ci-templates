@@ -1,0 +1,16 @@
+# Negative fixture: neither job bounds its own runtime, and the workflow
+# leaves permissions to the repository default.
+# Expected: permissions-missing x1, job-timeout x2.
+name: no-timeout
+on: push
+
+jobs:
+  quick:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: make lint
+
+  slow:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: make integration-test

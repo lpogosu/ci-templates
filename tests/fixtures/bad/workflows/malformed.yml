@@ -1,0 +1,8 @@
+# Negative fixture: not parseable at all. Expected: yaml.
+name: malformed
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+   steps:
+      - run: make build

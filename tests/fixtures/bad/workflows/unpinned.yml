@@ -1,0 +1,18 @@
+# Negative fixture: mutable action refs and a pinned ref with no version
+# comment. Expected: pinned-uses x3, pinned-uses-comment x1.
+name: unpinned
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@main
+      - uses: docker://alpine:3.22
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - run: node --version

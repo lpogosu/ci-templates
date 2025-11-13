@@ -1,0 +1,9 @@
+# Negative fixture: valid YAML, invalid workflow. `jobs` is a list, `on` is
+# missing, and a step has neither `run` nor `uses`. Expected: schema.
+name: schema-violation
+jobs:
+  - id: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: does nothing at all

@@ -1,0 +1,19 @@
+# Negative fixture: a reference back into this repository at a ref other than
+# the one ci-lint.yaml declares, which is how a workflow ends up calling a
+# composite action from a release it was never tested against.
+# Expected: self-reference-ref.
+name: self-reference
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: lpogosu/ci-templates/.github/actions/coverage-gate@v2
+        with:
+          report: coverage.xml
+          minimum: "80"

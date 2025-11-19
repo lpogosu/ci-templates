@@ -1,0 +1,51 @@
+name: semver-next
+description: >-
+  Derive the next semantic version and a changelog fragment from the
+  conventional commits made since the most recent tag.
+author: lpogosu
+
+# This is a composite action and not a reusable workflow on purpose. The
+# result is three strings that the next step in the same job has to consume,
+# and a reusable workflow only hands values back through a job output, which
+# means a second runner, a second checkout and a lost workspace. Anything that
+# has to run *inside* somebody else's job is step-shaped.
+
+inputs:
+  tag-prefix:
+    description: Prefix in front of the version inside the tag name.
+    required: false
+    default: v
+  initial-version:
+    description: Version used when the repository carries no matching tag yet.
+    required: false
+    default: 0.1.0
+
+outputs:
+  version:
+    description: Next version without the prefix, e.g. 1.4.0.
+    value: ${{ steps.derive.outputs.version }}
+  tag:
+    description: Next tag, i.e. tag-prefix followed by version.
+    value: ${{ steps.derive.outputs.tag }}
+  previous-tag:
+    description: Tag the range was measured from; empty on a first release.
+    value: ${{ steps.derive.outputs.previous-tag }}
+  bump:
+    description: "One of: major, minor, patch, initial, none."
+    value: ${{ steps.derive.outputs.bump }}
+  commits:
+    description: Number of non-merge commits considered.
+    value: ${{ steps.derive.outputs.commits }}
+  changelog-file:
+    description: Path to a markdown fragment describing the range.
+    value: ${{ steps.derive.outputs.changelog-file }}
+
+runs:
+  using: composite
+  steps:
+    - id: derive
+      shell: bash
+      env:
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        INITIAL_VERSION: ${{ inputs.initial-version }}
+      run: ${{ github.action_path }}/next.sh

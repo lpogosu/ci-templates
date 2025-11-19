@@ -1,0 +1,134 @@
+# Reusable Go pipeline: lint, test with the race detector, coverage gate,
+# build.
+#
+# The coverage gate reads the raw coverprofile rather than a report produced
+# by `go tool cover`, so the gate step does not need a Go toolchain of its own
+# and cannot disagree with the profile that the tests actually wrote.
+name: go
+
+on:
+  workflow_call:
+    inputs:
+      go-versions:
+        description: >-
+          JSON array of Go versions to build the matrix from. A single-element
+          array produces a single job.
+        type: string
+        default: '["1.25"]'
+      working-directory:
+        description: Directory containing go.mod; every step runs there.
+        type: string
+        default: "."
+      lint:
+        description: Run golangci-lint.
+        type: boolean
+        default: true
+      golangci-lint-version:
+        description: >-
+          golangci-lint release to install. Pinned, because a linter that
+          picks up new checks on its own turns an unrelated pull request red.
+        type: string
+        default: v2.13.2
+      test-command:
+        description: >-
+          Test command. Must write coverage-report when coverage-min is
+          greater than zero.
+        type: string
+        default: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      coverage-min:
+        description: Minimum total statement coverage in percent. 0 turns the gate off.
+        type: number
+        default: 0
+      coverage-report:
+        description: Go coverprofile read by the coverage gate.
+        type: string
+        default: coverage.out
+      build:
+        description: Run the build command after the tests pass.
+        type: boolean
+        default: true
+      build-command:
+        description: Build command; overridden when a repository builds several binaries.
+        type: string
+        default: go build ./...
+      goprivate:
+        description: >-
+          Value for GOPRIVATE, e.g. `example.internal/*`. Setting it also
+          rewrites the module proxy for those paths to authenticated HTTPS.
+        type: string
+        default: ""
+      runs-on:
+        description: Runner label; pinned rather than `ubuntu-latest`.
+        type: string
+        default: ubuntu-24.04
+      timeout-minutes:
+        description: Per-job timeout in minutes.
+        type: number
+        default: 20
+    secrets:
+      goprivate-token:
+        description: >-
+          Token used to fetch modules matched by goprivate. Ignored when
+          goprivate is empty.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: go ${{ matrix.go-version }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ${{ fromJSON(inputs.go-versions) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      GOPRIVATE: ${{ inputs.goprivate }}
+      GOPRIVATE_TOKEN: ${{ secrets.goprivate-token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+
+      - name: Configure private module access
+        if: ${{ inputs.goprivate != '' }}
+        run: |
+          if [ -z "$GOPRIVATE_TOKEN" ]; then
+            echo "::error::goprivate is set but the goprivate-token secret was not passed" >&2
+            exit 1
+          fi
+          host="${GOPRIVATE%%/*}"
+          git config --global "url.https://x-access-token:${GOPRIVATE_TOKEN}@${host}/.insteadOf" "https://${host}/"
+
+      - name: Lint
+        if: inputs.lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ inputs.golangci-lint-version }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Test
+        run: ${{ inputs.test-command }}
+
+      - name: Coverage gate
+        if: inputs.coverage-min > 0
+        uses: lpogosu/ci-templates/.github/actions/coverage-gate@v1
+        with:
+          report: ${{ inputs.working-directory }}/${{ inputs.coverage-report }}
+          format: go-coverprofile
+          minimum: ${{ inputs.coverage-min }}
+          label: go ${{ matrix.go-version }}
+
+      - name: Build
+        if: inputs.build
+        run: ${{ inputs.build-command }}

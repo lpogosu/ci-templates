@@ -1,0 +1,225 @@
+# Reusable container pipeline: build, tag, scan, then push.
+#
+# The order is the whole point. A pipeline that pushes first and scans second
+# reports vulnerabilities about an image that anyone can already pull; the
+# scan is a notification, not a gate. Here the image is built locally, scanned
+# from the local daemon, and only then pushed — the second build is a cache
+# replay, so the cost of the ordering is one buildx round trip, not one build.
+#
+# The gate covers a single platform (linux/amd64). Multi-platform builds
+# cannot be loaded into the local daemon, so a finding that exists only in the
+# arm64 variant is not caught. That is a real hole and is documented rather
+# than papered over.
+name: container
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Fully qualified image name without a tag, e.g. ghcr.io/acme/api.
+        type: string
+        required: true
+      registry:
+        description: Registry to log in to. Must match the host part of image.
+        type: string
+        default: ghcr.io
+      context:
+        description: Build context passed to buildx.
+        type: string
+        default: "."
+      dockerfile:
+        description: Path to the Dockerfile, relative to the repository root.
+        type: string
+        default: Dockerfile
+      target:
+        description: Build stage to stop at. Empty means the last stage.
+        type: string
+        default: ""
+      build-args:
+        description: Newline-separated KEY=value build arguments.
+        type: string
+        default: ""
+      platforms:
+        description: >-
+          Comma-separated buildx platforms for the pushed image. QEMU is only
+          installed when more than one is requested.
+        type: string
+        default: linux/amd64
+      push:
+        description: >-
+          Push after a clean scan. Pull requests never push regardless, because
+          a fork has no registry credentials and does not deserve a tag.
+        type: boolean
+        default: true
+      scan:
+        description: Run the vulnerability gate. Turning it off is a decision, not a default.
+        type: boolean
+        default: true
+      scan-severity:
+        description: Severities that block the push.
+        type: string
+        default: HIGH,CRITICAL
+      scan-ignore-unfixed:
+        description: >-
+          Ignore findings with no released fix. On by default: a gate a team
+          cannot satisfy is a gate a team switches off.
+        type: boolean
+        default: true
+      trivy-version:
+        description: Trivy release used by the gate; pinned so results move when we move them.
+        type: string
+        default: v0.70.0
+      runs-on:
+        description: Runner label; pinned rather than `ubuntu-latest`.
+        type: string
+        default: ubuntu-24.04
+      timeout-minutes:
+        description: Per-job timeout in minutes.
+        type: number
+        default: 30
+    secrets:
+      registry-username:
+        description: >-
+          Registry user. Leave unset for ghcr.io, where the workflow token is
+          used instead.
+        required: false
+      registry-password:
+        description: Registry password or token; required whenever registry-username is set.
+        required: false
+    outputs:
+      digest:
+        description: Digest of the pushed manifest, empty when nothing was pushed.
+        value: ${{ jobs.image.outputs.digest }}
+      tags:
+        description: Newline-separated list of tags that were applied.
+        value: ${{ jobs.image.outputs.tags }}
+      pushed:
+        description: "true when the image reached the registry."
+        value: ${{ jobs.image.outputs.pushed }}
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      # Needed only for the push to ghcr.io with the workflow token.
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+      pushed: ${{ steps.decide.outputs.push }}
+    env:
+      SCAN_TAG: ${{ inputs.image }}:ci-scan-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide whether this run pushes
+        id: decide
+        env:
+          WANT_PUSH: ${{ inputs.push }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$WANT_PUSH" = true ] && [ "$EVENT" != pull_request ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        if: contains(inputs.platforms, ',')
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ inputs.image }}
+          # Branch and PR tags are moving pointers for humans; the sha tag and
+          # the digest are what a deployment should ever reference.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build for the scan
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          target: ${{ inputs.target }}
+          build-args: ${{ inputs.build-args }}
+          # Single platform on purpose: `load` cannot import a manifest list.
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ env.SCAN_TAG }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Vulnerability gate
+        if: inputs.scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.SCAN_TAG }}
+          version: ${{ inputs.trivy-version }}
+          severity: ${{ inputs.scan-severity }}
+          ignore-unfixed: ${{ inputs.scan-ignore-unfixed }}
+          exit-code: "1"
+          format: table
+
+      - name: Log in to the registry
+        if: steps.decide.outputs.push == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ secrets.registry-username || github.actor }}
+          password: ${{ secrets.registry-password || github.token }}
+
+      - name: Push
+        id: push
+        if: steps.decide.outputs.push == 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          target: ${{ inputs.target }}
+          build-args: ${{ inputs.build-args }}
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          PUSHED: ${{ steps.decide.outputs.push }}
+        run: |
+          {
+            echo "### container"
+            echo
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| pushed | \`$PUSHED\` |"
+            echo "| digest | \`${DIGEST:-none}\` |"
+            echo
+            echo '```'
+            echo "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

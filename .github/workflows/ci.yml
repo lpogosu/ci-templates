@@ -1,0 +1,93 @@
+# The templates check themselves.
+#
+# Three passes, in order of how fast they tell you something useful:
+# ci-lint (schema + invariants, under a second), actionlint (expression and
+# shell analysis of the workflows), then the test suite. actionlint is
+# installed from a release tarball verified against a recorded SHA-256 rather
+# than from a marketplace action, because installing a pinning checker from an
+# unpinnable source would be a strange way to start.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint Python
+        run: |
+          ruff check --output-format=github .
+          ruff format --check .
+          mypy
+
+      - name: Lint shell
+        run: shellcheck .github/actions/semver-next/next.sh
+
+      - name: ci-lint
+        run: make check
+
+      - name: actionlint
+        run: make actionlint
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest --cov --cov-report=xml --cov-report=term-missing
+
+      - name: Coverage gate
+        uses: ./.github/actions/coverage-gate
+        with:
+          report: coverage.xml
+          format: cobertura
+          minimum: "90"
+          label: ci-lint
+
+  schemas-are-current:
+    # The vendored schemas are pinned, so nothing tells us when upstream has
+    # moved except asking. Weekly, on its own, and never on a pull request:
+    # somebody else's commit to SchemaStore is not a reason to block a review.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare with upstream
+        run: make schemas-check

@@ -1,0 +1,182 @@
+# Reusable Node pipeline: install, lint, type-check, test with a coverage
+# gate, build.
+#
+# Only npm and pnpm are supported. Yarn Classic has no `--if-present` and a
+# different lockfile-integrity flag, and pretending otherwise would mean an
+# input that silently does nothing on one of the three. Corepack activates
+# pnpm, so no extra marketplace action is needed for it.
+name: node
+
+on:
+  workflow_call:
+    inputs:
+      node-versions:
+        description: >-
+          JSON array of Node major versions to build the matrix from.
+          A single-element array produces a single job.
+        type: string
+        default: '["24"]'
+      package-manager:
+        description: Either `npm` or `pnpm`. Anything else fails the setup step.
+        type: string
+        default: npm
+      working-directory:
+        description: Directory containing package.json; every step runs there.
+        type: string
+        default: "."
+      install:
+        description: >-
+          Dependency install command. The default is chosen from
+          package-manager and always honours the lockfile.
+        type: string
+        default: ""
+      cache-dependency-path:
+        description: >-
+          Glob passed to actions/setup-node as the cache key source.
+          Empty string lets the action use its own defaults.
+        type: string
+        default: ""
+      lint:
+        description: Run the lint script when package.json defines one.
+        type: boolean
+        default: true
+      typecheck:
+        description: Run the typecheck script when package.json defines one.
+        type: boolean
+        default: true
+      build:
+        description: Run the build script after the tests pass.
+        type: boolean
+        default: true
+      test-command:
+        description: >-
+          Test command. Must produce coverage-report when coverage-min is
+          greater than zero.
+        type: string
+        default: npm run test -- --coverage --coverage.reporter=cobertura
+      coverage-min:
+        description: >-
+          Minimum total line coverage in percent. 0 turns the gate off.
+        type: number
+        default: 0
+      coverage-report:
+        description: Cobertura XML file read by the coverage gate.
+        type: string
+        default: coverage/cobertura-coverage.xml
+      artifact-path:
+        description: >-
+          Build output to upload. A library that produces nothing sets
+          `build: false` rather than emptying this, so that a build which runs
+          and emits no files stays a loud failure.
+        type: string
+        default: dist
+      registry-url:
+        description: >-
+          Private npm registry. Setting it makes actions/setup-node write an
+          .npmrc that reads the npm-token secret; leaving it empty means no
+          .npmrc is written at all.
+        type: string
+        default: ""
+      runs-on:
+        description: Runner label; pinned rather than `ubuntu-latest`.
+        type: string
+        default: ubuntu-24.04
+      timeout-minutes:
+        description: Per-job timeout in minutes.
+        type: number
+        default: 15
+    secrets:
+      npm-token:
+        description: >-
+          Token for registry-url, exported as NODE_AUTH_TOKEN. Only has an
+          effect when registry-url is set.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: node ${{ matrix.node-version }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ${{ fromJSON(inputs.node-versions) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.npm-token }}
+      # Inputs reach shell steps through the environment rather than through
+      # `${{ }}` interpolation into the script body. The values are trusted
+      # here, but the habit is what keeps an untrusted one from sneaking in.
+      PACKAGE_MANAGER: ${{ inputs.package-manager }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Activate package manager
+        # Corepack ships with Node, so pnpm needs no separate action. The case
+        # statement also rejects an unsupported value loudly instead of
+        # letting a later step fail with "command not found".
+        run: |
+          case "$PACKAGE_MANAGER" in
+            npm) ;;
+            pnpm) corepack enable pnpm ;;
+            *) echo "::error::package-manager must be npm or pnpm, got '$PACKAGE_MANAGER'" >&2; exit 1 ;;
+          esac
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+          registry-url: ${{ inputs.registry-url }}
+
+      - name: Install dependencies
+        env:
+          INSTALL_COMMAND: ${{ inputs.install }}
+        run: |
+          if [ -n "$INSTALL_COMMAND" ]; then
+            sh -c "$INSTALL_COMMAND"
+          elif [ "$PACKAGE_MANAGER" = pnpm ]; then
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Lint
+        if: inputs.lint
+        run: $PACKAGE_MANAGER run --if-present lint
+
+      - name: Type check
+        if: inputs.typecheck
+        run: $PACKAGE_MANAGER run --if-present typecheck
+
+      - name: Test
+        run: ${{ inputs.test-command }}
+
+      - name: Coverage gate
+        if: inputs.coverage-min > 0
+        uses: lpogosu/ci-templates/.github/actions/coverage-gate@v1
+        with:
+          report: ${{ inputs.working-directory }}/${{ inputs.coverage-report }}
+          format: cobertura
+          minimum: ${{ inputs.coverage-min }}
+          label: node ${{ matrix.node-version }}
+
+      - name: Build
+        if: inputs.build
+        run: $PACKAGE_MANAGER run --if-present build
+
+      - name: Upload build output
+        if: inputs.build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-node-${{ matrix.node-version }}
+          path: ${{ inputs.working-directory }}/${{ inputs.artifact-path }}
+          if-no-files-found: error
+          retention-days: 7

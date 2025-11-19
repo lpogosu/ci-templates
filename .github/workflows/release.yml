@@ -1,0 +1,97 @@
+# Reusable release pipeline: derive the next semantic version from the
+# conventional commits since the last tag, build a changelog from the same
+# commits, and publish a GitHub Release.
+#
+# The tag is created by the release API from `tag_name` and `target_commitish`
+# rather than by `git push --tags`. That is why the checkout below does not
+# keep credentials: nothing in this workflow writes to the repository over
+# git, so nothing needs a git credential in the workspace.
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      tag-prefix:
+        description: Prefix in front of the version in the tag name.
+        type: string
+        default: v
+      initial-version:
+        description: Version used for the first release, when no tag exists yet.
+        type: string
+        default: 0.1.0
+      files:
+        description: Newline-separated globs of assets to attach. Empty attaches nothing.
+        type: string
+        default: ""
+      draft:
+        description: Create the release as a draft.
+        type: boolean
+        default: false
+      prerelease:
+        description: Mark the release as a prerelease.
+        type: boolean
+        default: false
+      dry-run:
+        description: >-
+          Compute the version and the changelog, write them to the job summary,
+          and stop. The only way to review what a release workflow will do
+          before it does it.
+        type: boolean
+        default: false
+      runs-on:
+        description: Runner label; pinned rather than `ubuntu-latest`.
+        type: string
+        default: ubuntu-24.04
+      timeout-minutes:
+        description: Per-job timeout in minutes.
+        type: number
+        default: 10
+    outputs:
+      version:
+        description: Version that was released, empty when nothing was released.
+        value: ${{ jobs.release.outputs.version }}
+      bump:
+        description: "One of: major, minor, patch, none."
+        value: ${{ jobs.release.outputs.bump }}
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      # Creating the tag and the release object. Nothing else is written.
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      bump: ${{ steps.version.outputs.bump }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Version derivation needs every tag and every commit since the
+          # previous one; a shallow clone silently produces a wrong answer.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Derive version and changelog
+        id: version
+        uses: lpogosu/ci-templates/.github/actions/semver-next@v1
+        with:
+          tag-prefix: ${{ inputs.tag-prefix }}
+          initial-version: ${{ inputs.initial-version }}
+
+      - name: Publish
+        if: ${{ steps.version.outputs.bump != 'none' && !inputs.dry-run }}
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.version.outputs.tag }}
+          body_path: ${{ steps.version.outputs.changelog-file }}
+          files: ${{ inputs.files }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          fail_on_unmatched_files: true
+          make_latest: ${{ !inputs.prerelease }}

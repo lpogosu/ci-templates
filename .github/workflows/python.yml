@@ -1,0 +1,150 @@
+# Reusable Python pipeline: lint, type-check, test, coverage gate.
+#
+# A caller needs three lines. Everything below is a default that can be
+# overridden one input at a time; nothing here reads repository state that the
+# caller has not passed in explicitly.
+#
+# Every `uses:` is pinned to a commit SHA with the tag in a trailing comment.
+# The tag is documentation for humans; the SHA is what actually runs.
+name: python
+
+on:
+  workflow_call:
+    inputs:
+      python-versions:
+        description: >-
+          JSON array of interpreter versions to build the matrix from.
+          A single-element array produces a single job.
+        type: string
+        default: '["3.13"]'
+      working-directory:
+        description: Directory containing the project; every step runs there.
+        type: string
+        default: "."
+      install:
+        description: >-
+          Command that installs the project together with its development
+          extras. Runs in working-directory.
+        type: string
+        default: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      cache:
+        description: >-
+          Dependency cache backend for actions/setup-python
+          (pip, pipenv, poetry). Empty string disables caching.
+        type: string
+        default: pip
+      cache-dependency-path:
+        description: >-
+          Glob passed to actions/setup-python as the cache key source.
+          Empty string lets the action use its own defaults.
+        type: string
+        default: ""
+      lint:
+        description: Run `ruff check` and `ruff format --check`.
+        type: boolean
+        default: true
+      typecheck:
+        description: Run `mypy`; configuration comes from the project itself.
+        type: boolean
+        default: true
+      test-command:
+        description: >-
+          Test command. Must produce coverage-report when coverage-min is
+          greater than zero.
+        type: string
+        default: pytest --cov --cov-report=xml --cov-report=term-missing
+      coverage-min:
+        description: >-
+          Minimum total line coverage in percent. 0 turns the gate off, which
+          is the default because a number chosen by this repository would be
+          wrong for most callers.
+        type: number
+        default: 0
+      coverage-report:
+        description: Cobertura XML file read by the coverage gate.
+        type: string
+        default: coverage.xml
+      runs-on:
+        description: >-
+          Runner label. Pinned to a concrete image by default: `ubuntu-latest`
+          changes underneath green pipelines twice a year.
+        type: string
+        default: ubuntu-24.04
+      timeout-minutes:
+        description: Per-job timeout in minutes.
+        type: number
+        default: 15
+    secrets:
+      codecov-token:
+        description: >-
+          Codecov upload token. When it is not passed the upload step is
+          skipped instead of failing, so a fork PR does not go red on a secret
+          it can never have.
+        required: false
+
+# Permissions of a called workflow are intersected with the caller's, so this
+# is a ceiling, not a grant: read is all any job below needs.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: python ${{ matrix.python-version }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      # One red interpreter should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      # The `secrets` context is not available in a step-level `if`, so the
+      # optional token is lifted to the job environment and tested there.
+      CODECOV_TOKEN: ${{ secrets.codecov-token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: ${{ inputs.cache }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: Install project
+        run: ${{ inputs.install }}
+
+      - name: Lint
+        if: inputs.lint
+        run: |
+          ruff check --output-format=github .
+          ruff format --check .
+
+      - name: Type check
+        if: inputs.typecheck
+        run: mypy
+
+      - name: Test
+        run: ${{ inputs.test-command }}
+
+      - name: Coverage gate
+        if: inputs.coverage-min > 0
+        uses: lpogosu/ci-templates/.github/actions/coverage-gate@v1
+        with:
+          report: ${{ inputs.working-directory }}/${{ inputs.coverage-report }}
+          format: cobertura
+          minimum: ${{ inputs.coverage-min }}
+          label: python ${{ matrix.python-version }}
+
+      - name: Upload coverage to Codecov
+        # Skipped rather than failed when the caller did not pass the token.
+        if: ${{ inputs.coverage-min > 0 && env.CODECOV_TOKEN != '' }}
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          token: ${{ env.CODECOV_TOKEN }}
+          files: ${{ inputs.working-directory }}/${{ inputs.coverage-report }}
+          fail_ci_if_error: true

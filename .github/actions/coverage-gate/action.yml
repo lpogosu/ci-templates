@@ -1,0 +1,52 @@
+name: coverage-gate
+description: >-
+  Fail the job when total coverage is below a threshold, and write the number
+  into the job summary either way.
+author: lpogosu
+
+# Step-shaped for two reasons. It has to read a file that the test step just
+# produced in the same workspace, and it has to append to the job summary of
+# the job that ran the tests. A reusable workflow can do neither.
+#
+# One implementation covers three ecosystems: Python, Node and Go all end up
+# producing either a Cobertura XML report or a Go coverprofile, so the message
+# a developer sees on a failure is identical in all three pipelines.
+
+inputs:
+  report:
+    description: Path to a Cobertura XML report or a Go coverprofile.
+    required: true
+  format:
+    description: "One of: auto, cobertura, go-coverprofile."
+    required: false
+    default: auto
+  minimum:
+    description: Minimum total line coverage in percent.
+    required: true
+  label:
+    description: Name shown in the job summary, e.g. "python 3.13".
+    required: false
+    default: coverage
+
+outputs:
+  coverage:
+    description: Measured total coverage in percent, rounded to two decimals.
+    value: ${{ steps.gate.outputs.coverage }}
+  covered:
+    description: Number of covered lines or statements.
+    value: ${{ steps.gate.outputs.covered }}
+  total:
+    description: Number of measurable lines or statements.
+    value: ${{ steps.gate.outputs.total }}
+
+runs:
+  using: composite
+  steps:
+    - id: gate
+      shell: bash
+      env:
+        COVERAGE_REPORT: ${{ inputs.report }}
+        COVERAGE_FORMAT: ${{ inputs.format }}
+        COVERAGE_MINIMUM: ${{ inputs.minimum }}
+        COVERAGE_LABEL: ${{ inputs.label }}
+      run: python3 "${{ github.action_path }}/gate.py"
